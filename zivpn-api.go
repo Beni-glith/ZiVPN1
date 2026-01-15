@@ -968,8 +968,8 @@ func sendMultiLoginNotification(username, clientIP string, ipLimit, activeCount 
 	ispName := getIspName(clientIP)
 	domain := getDomainName()
 
-	message := fmt.Sprintf("┌───────────────────┐\n   NOTIF MULTI LOGIN\n└───────────────────┘\n Domain   : %s\n Username : %s\n Isp      : %s\n Limit IP : %d\n Login IP : %d\n└───────────────────┘",
-		domain, username, ispName, ipLimit, activeCount,
+	message := fmt.Sprintf("┌───────────────────┐\n   NOTIF MULTI LOGIN\n└───────────────────┘\n Domain     : %s\n Password   : %s\n Isp        : %s\n IP Aktif   : %d/%d\n Action     : notify\n└───────────────────┘",
+		domain, username, ispName, activeCount, ipLimit,
 	)
 
 	payload := map[string]interface{}{

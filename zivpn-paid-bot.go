@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,42 +24,21 @@ import (
 // Constants & Configuration
 // ==========================================
 
-const (
-	BotConfigFile = "/etc/zivpn/bot-config.json"
-	ApiPortFile   = "/etc/zivpn/api_port"
-	ApiKeyFile    = "/etc/zivpn/apikey"
-	DomainFile    = "/etc/zivpn/domain"
-	PortFile	  = "/etc/zivpn/port"
-)
-
-var ApiUrl = "http://127.0.0.1:" + PortFile + "/api"
-
-var ApiKey = "AutoFtBot-agskjgdvsbdreiWG1234512SDKrqw"
-
 type BotConfig struct {
 	BotToken      string `json:"bot_token"`
-	AdminID        int64  `json:"admin_id"`
-	Mode           string `json:"mode"`
-	Domain         string `json:"domain"`
-	PakasirSlug    string `json:"pakasir_slug"`
-	PakasirApiKey  string `json:"pakasir_api_key"`
-	DailyPrice     int    `json:"daily_price"`
-}
-
-type IpInfo struct {
-	City string `json:"city"`
-	Isp  string `json:"isp"`
-}
-
-type UserData struct {
-	Password string `json:"password"`
-	Expired  string `json:"expired"`
-	Status   string `json:"status"`
+	AdminID       int64  `json:"admin_id"`
+	Mode          string `json:"mode"`
+	Domain        string `json:"domain"`
+	PakasirSlug   string `json:"pakasir_slug"`
+	PakasirApiKey string `json:"pakasir_api_key"`
+	DailyPrice    int    `json:"daily_price"`
 }
 
 // ==========================================
 // Global State
 // ==========================================
+
+const DefaultPaidIpLimit = 1
 
 var userStates = make(map[int64]string)
 var tempUserData = make(map[int64]map[string]string)
@@ -120,11 +98,6 @@ func handleMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, config *BotConfi
 	// In Paid Bot, everyone can access, but actions are restricted/paid
 	// Admin still has full control
 
-	if state, exists := userStates[msg.From.ID]; exists {
-		handleState(bot, msg, state, config)
-		return
-	}
-
 	// Handle Document Upload (Restore) - Admin Only
 	if msg.Document != nil && msg.From.ID == config.AdminID {
 		if state, exists := userStates[msg.From.ID]; exists && state == "waiting_restore_file" {
@@ -133,10 +106,19 @@ func handleMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, config *BotConfi
 		}
 	}
 
+	if state, exists := userStates[msg.From.ID]; exists {
+		handleState(bot, msg, state, config)
+		return
+	}
+
 	if msg.IsCommand() {
 		switch msg.Command() {
 		case "start":
 			showMainMenu(bot, msg.Chat.ID, config)
+		case "lock":
+			handleLockCommand(bot, msg, config, true)
+		case "unlock":
+			handleLockCommand(bot, msg, config, false)
 		default:
 			replyError(bot, msg.Chat.ID, "Perintah tidak dikenal.")
 		}
@@ -157,6 +139,30 @@ func handleCallback(bot *tgbotapi.BotAPI, query *tgbotapi.CallbackQuery, config 
 
 	case query.Data == "menu_admin":
 		if userID == config.AdminID {
+			showAdminMenu(bot, chatID)
+		}
+	case query.Data == "menu_create_admin":
+		if userID == config.AdminID {
+			startAdminCreateUser(bot, chatID, userID)
+		}
+	case query.Data == "menu_delete":
+		if userID == config.AdminID {
+			showUserSelection(bot, chatID, 1, "delete")
+		}
+	case query.Data == "menu_renew":
+		if userID == config.AdminID {
+			showUserSelection(bot, chatID, 1, "renew")
+		}
+	case query.Data == "menu_list":
+		if userID == config.AdminID {
+			listUsers(bot, chatID)
+		}
+	case query.Data == "menu_cleanup":
+		if userID == config.AdminID {
+			cleanupExpiredUsers(bot, chatID, config)
+		}
+	case query.Data == "menu_backup_restore":
+		if userID == config.AdminID {
 			showBackupRestoreMenu(bot, chatID)
 		}
 	case query.Data == "menu_backup_action":
@@ -167,6 +173,15 @@ func handleCallback(bot *tgbotapi.BotAPI, query *tgbotapi.CallbackQuery, config 
 		if userID == config.AdminID {
 			startRestore(bot, chatID, userID)
 		}
+	case strings.HasPrefix(query.Data, "page_"):
+		handlePagination(bot, chatID, query.Data)
+	case strings.HasPrefix(query.Data, "select_renew:"):
+		startRenewUser(bot, chatID, userID, query.Data)
+	case strings.HasPrefix(query.Data, "select_delete:"):
+		confirmDeleteUser(bot, chatID, query.Data)
+	case strings.HasPrefix(query.Data, "confirm_delete:"):
+		username := strings.TrimPrefix(query.Data, "confirm_delete:")
+		deleteUser(bot, chatID, username, config)
 	}
 
 	bot.Request(tgbotapi.NewCallback(query.ID, ""))
@@ -179,7 +194,7 @@ func handleState(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, state string, conf
 
 	switch state {
 	case "create_password":
-		if !validatePassword(bot, chatID, text) {
+		if !validateUsername(bot, chatID, text) {
 			return
 		}
 		mutex.Lock()
@@ -199,6 +214,30 @@ func handleState(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, state string, conf
 
 		// Process Payment
 		processPayment(bot, chatID, userID, days, config)
+	case "admin_create_password":
+		if !validateUsername(bot, chatID, text) {
+			return
+		}
+		mutex.Lock()
+		tempUserData[userID]["password"] = text
+		mutex.Unlock()
+		userStates[userID] = "admin_create_days"
+		sendMessage(bot, chatID, "⏳ Masukkan Durasi (hari):")
+	case "admin_create_days":
+		days, ok := validateNumber(bot, chatID, text, 1, 9999, "Durasi")
+		if !ok {
+			return
+		}
+		password := tempUserData[userID]["password"]
+		createUser(bot, chatID, password, days, DefaultPaidIpLimit, config)
+		resetState(userID)
+	case "renew_days":
+		days, ok := validateNumber(bot, chatID, text, 1, 9999, "Durasi")
+		if !ok {
+			return
+		}
+		renewUser(bot, chatID, tempUserData[userID]["username"], days, config)
+		resetState(userID)
 	}
 }
 
@@ -213,6 +252,14 @@ func startCreateUser(bot *tgbotapi.BotAPI, chatID int64, userID int64) {
 	tempUserData[userID]["chat_id"] = strconv.FormatInt(chatID, 10)
 	mutex.Unlock()
 	sendMessage(bot, chatID, "👤 Masukkan Password Baru:")
+}
+
+func startAdminCreateUser(bot *tgbotapi.BotAPI, chatID int64, userID int64) {
+	userStates[userID] = "admin_create_password"
+	mutex.Lock()
+	tempUserData[userID] = make(map[string]string)
+	mutex.Unlock()
+	sendMessage(bot, chatID, "👤 Masukkan Password:")
 }
 
 func processPayment(bot *tgbotapi.BotAPI, chatID int64, userID int64, days int, config *BotConfig) {
@@ -264,6 +311,246 @@ func processPayment(bot *tgbotapi.BotAPI, chatID int64, userID int64, days int, 
 	delete(userStates, userID)
 }
 
+func startRenewUser(bot *tgbotapi.BotAPI, chatID int64, userID int64, data string) {
+	username := strings.TrimPrefix(data, "select_renew:")
+	mutex.Lock()
+	tempUserData[userID] = map[string]string{"username": username}
+	mutex.Unlock()
+	userStates[userID] = "renew_days"
+	sendMessage(bot, chatID, fmt.Sprintf("🔄 Renewing %s\n⏳ Masukkan Tambahan Durasi (hari):", username))
+}
+
+func confirmDeleteUser(bot *tgbotapi.BotAPI, chatID int64, data string) {
+	username := strings.TrimPrefix(data, "select_delete:")
+	msg := tgbotapi.NewMessage(chatID, fmt.Sprintf("❓ Yakin ingin menghapus user `%s`?", username))
+	msg.ParseMode = "Markdown"
+	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("✅ Ya, Hapus", "confirm_delete:"+username),
+			tgbotapi.NewInlineKeyboardButtonData("❌ Batal", "cancel"),
+		),
+	)
+	sendAndTrack(bot, msg)
+}
+
+func handlePagination(bot *tgbotapi.BotAPI, chatID int64, data string) {
+	parts := strings.Split(data, ":")
+	action := parts[0][5:] // remove "page_"
+	page, _ := strconv.Atoi(parts[1])
+	showUserSelection(bot, chatID, page, action)
+}
+
+func showUserSelection(bot *tgbotapi.BotAPI, chatID int64, page int, action string) {
+	users, err := getUsers()
+	if err != nil {
+		replyError(bot, chatID, "Gagal mengambil data user.")
+		return
+	}
+
+	if len(users) == 0 {
+		sendMessage(bot, chatID, "📂 Tidak ada user.")
+		return
+	}
+
+	perPage := 10
+	totalPages := (len(users) + perPage - 1) / perPage
+
+	if page < 1 {
+		page = 1
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+
+	start := (page - 1) * perPage
+	end := start + perPage
+	if end > len(users) {
+		end = len(users)
+	}
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for _, u := range users[start:end] {
+		label := fmt.Sprintf("%s (%s)", u.Password, u.Status)
+		if u.Status == "Expired" {
+			label = fmt.Sprintf("🔴 %s", label)
+		} else {
+			label = fmt.Sprintf("🟢 %s", label)
+		}
+		data := fmt.Sprintf("select_%s:%s", action, u.Password)
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(label, data),
+		))
+	}
+
+	var navRow []tgbotapi.InlineKeyboardButton
+	if page > 1 {
+		navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("⬅️ Prev", fmt.Sprintf("page_%s:%d", action, page-1)))
+	}
+	if page < totalPages {
+		navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("Next ➡️", fmt.Sprintf("page_%s:%d", action, page+1)))
+	}
+	if len(navRow) > 0 {
+		rows = append(rows, navRow)
+	}
+
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("❌ Batal", "cancel")))
+
+	msg := tgbotapi.NewMessage(chatID, fmt.Sprintf("📋 Pilih User untuk %s (Halaman %d/%d):", strings.Title(action), page, totalPages))
+	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(rows...)
+	sendAndTrack(bot, msg)
+}
+
+func deleteUser(bot *tgbotapi.BotAPI, chatID int64, username string, config *BotConfig) {
+	res, err := apiCall("POST", "/user/delete", map[string]interface{}{
+		"password": username,
+	})
+
+	if err != nil {
+		replyError(bot, chatID, "Error API: "+err.Error())
+		return
+	}
+
+	if res["success"] == true {
+		msg := tgbotapi.NewMessage(chatID, "✅ Password berhasil dihapus.")
+		deleteLastMessage(bot, chatID)
+		bot.Send(msg)
+		showMainMenu(bot, chatID, config)
+	} else {
+		replyError(bot, chatID, fmt.Sprintf("Gagal: %s", res["message"]))
+		showMainMenu(bot, chatID, config)
+	}
+}
+
+func renewUser(bot *tgbotapi.BotAPI, chatID int64, username string, days int, config *BotConfig) {
+	res, err := apiCall("POST", "/user/renew", map[string]interface{}{
+		"password": username,
+		"days":     days,
+	})
+
+	if err != nil {
+		replyError(bot, chatID, "Error API: "+err.Error())
+		return
+	}
+
+	if res["success"] == true {
+		data := res["data"].(map[string]interface{})
+		sendAccountInfo(bot, chatID, data, config)
+	} else {
+		replyError(bot, chatID, fmt.Sprintf("Gagal: %s", res["message"]))
+		showMainMenu(bot, chatID, config)
+	}
+}
+
+func listUsers(bot *tgbotapi.BotAPI, chatID int64) {
+	res, err := apiCall("GET", "/users", nil)
+	if err != nil {
+		replyError(bot, chatID, "Error API: "+err.Error())
+		return
+	}
+
+	if res["success"] == true {
+		users := res["data"].([]interface{})
+		if len(users) == 0 {
+			sendMessage(bot, chatID, "📂 Tidak ada user.")
+			return
+		}
+
+		msg := "📋 *List Passwords*\n"
+		for _, u := range users {
+			user := u.(map[string]interface{})
+			status := "🟢"
+			if user["status"] == "Expired" {
+				status = "🔴"
+			} else if user["status"] == "Locked" {
+				status = "🔒"
+			}
+			msg += fmt.Sprintf("\n%s `%s` (%s)", status, user["password"], user["expired"])
+		}
+
+		reply := tgbotapi.NewMessage(chatID, msg)
+		reply.ParseMode = "Markdown"
+		sendAndTrack(bot, reply)
+	} else {
+		replyError(bot, chatID, "Gagal mengambil data.")
+	}
+}
+
+func cleanupExpiredUsers(bot *tgbotapi.BotAPI, chatID int64, config *BotConfig) {
+	sendMessage(bot, chatID, "⏳ Sedang membersihkan akun expired...")
+
+	res, err := apiCall("POST", "/cron/cleanup", nil)
+	if err != nil {
+		replyError(bot, chatID, "Error API: "+err.Error())
+		showMainMenu(bot, chatID, config)
+		return
+	}
+
+	if res["success"] == true {
+		data := res["data"]
+		if data != nil {
+			dataMap := data.(map[string]interface{})
+			count := int(dataMap["deleted_count"].(float64))
+			if count > 0 {
+				deletedUsers := dataMap["deleted_users"].([]interface{})
+				userList := ""
+				for _, u := range deletedUsers {
+					userList += fmt.Sprintf("\n• `%s`", u.(string))
+				}
+				msg := fmt.Sprintf("✅ Berhasil menghapus %d akun expired:%s", count, userList)
+				reply := tgbotapi.NewMessage(chatID, msg)
+				reply.ParseMode = "Markdown"
+				deleteLastMessage(bot, chatID)
+				bot.Send(reply)
+			} else {
+				sendMessage(bot, chatID, "✅ Tidak ada akun expired yang perlu dihapus.")
+			}
+		} else {
+			sendMessage(bot, chatID, "✅ "+res["message"].(string))
+		}
+	} else {
+		replyError(bot, chatID, fmt.Sprintf("Gagal: %s", res["message"]))
+	}
+	showMainMenu(bot, chatID, config)
+}
+
+func handleLockCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, config *BotConfig, lock bool) {
+	if msg.From.ID != config.AdminID {
+		replyError(bot, msg.Chat.ID, "⛔ Akses Ditolak. Hanya admin.")
+		return
+	}
+
+	username := strings.TrimSpace(msg.CommandArguments())
+	if username == "" {
+		action := "lock"
+		if !lock {
+			action = "unlock"
+		}
+		sendMessage(bot, msg.Chat.ID, fmt.Sprintf("Format: /%s <username>", action))
+		return
+	}
+
+	endpoint := "/user/lock"
+	successMessage := "✅ User berhasil di-lock."
+	if !lock {
+		endpoint = "/user/unlock"
+		successMessage = "✅ User berhasil di-unlock."
+	}
+
+	res, err := apiCall("POST", endpoint, map[string]interface{}{
+		"username": username,
+	})
+	if err != nil {
+		replyError(bot, msg.Chat.ID, "Error API: "+err.Error())
+		return
+	}
+
+	if res["success"] == true {
+		sendMessage(bot, msg.Chat.ID, successMessage)
+	} else {
+		replyError(bot, msg.Chat.ID, fmt.Sprintf("Gagal: %s", res["message"]))
+	}
+}
+
 func startPaymentChecker(bot *tgbotapi.BotAPI, config *BotConfig) {
 	ticker := time.NewTicker(1 * time.Minute)
 	for range ticker.C {
@@ -272,14 +559,14 @@ func startPaymentChecker(bot *tgbotapi.BotAPI, config *BotConfig) {
 			if orderID, ok := data["order_id"]; ok {
 				price := data["price"]
 				chatID, _ := strconv.ParseInt(data["chat_id"], 10, 64)
-				
+
 				status, err := checkPakasirStatus(config, orderID, price)
 				if err == nil && (status == "completed" || status == "success") {
 					// Payment Success
 					password := data["password"]
 					days, _ := strconv.Atoi(data["days"])
-					
-					createUser(bot, chatID, password, days, config)
+
+					createUser(bot, chatID, password, days, DefaultPaidIpLimit, config)
 					delete(tempUserData, userID)
 					delete(userStates, userID)
 				} else if err != nil {
@@ -291,10 +578,11 @@ func startPaymentChecker(bot *tgbotapi.BotAPI, config *BotConfig) {
 	}
 }
 
-func createUser(bot *tgbotapi.BotAPI, chatID int64, password string, days int, config *BotConfig) {
+func createUser(bot *tgbotapi.BotAPI, chatID int64, password string, days int, ipLimit int, config *BotConfig) {
 	res, err := apiCall("POST", "/user/create", map[string]interface{}{
 		"password": password,
 		"days":     days,
+		"ip_limit": ipLimit,
 	})
 
 	if err != nil {
@@ -385,7 +673,7 @@ func showMainMenu(bot *tgbotapi.BotAPI, chatID int64, config *BotConfig) {
 
 	msg := tgbotapi.NewMessage(chatID, msgText)
 	msg.ParseMode = "Markdown"
-	
+
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("🛒 Beli Akun Premium", "menu_create"),
@@ -406,6 +694,29 @@ func showMainMenu(bot *tgbotapi.BotAPI, chatID int64, config *BotConfig) {
 	sendAndTrack(bot, msg)
 }
 
+func showAdminMenu(bot *tgbotapi.BotAPI, chatID int64) {
+	msg := tgbotapi.NewMessage(chatID, "🛠️ *Admin Panel*\nSilakan pilih menu:")
+	msg.ParseMode = "Markdown"
+	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("👤 Create Password", "menu_create_admin"),
+			tgbotapi.NewInlineKeyboardButtonData("🗑️ Delete Password", "menu_delete"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔄 Renew Password", "menu_renew"),
+			tgbotapi.NewInlineKeyboardButtonData("📋 List Passwords", "menu_list"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🧹 Cleanup Expired", "menu_cleanup"),
+			tgbotapi.NewInlineKeyboardButtonData("💾 Backup & Restore", "menu_backup_restore"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("❌ Kembali", "cancel"),
+		),
+	)
+	sendAndTrack(bot, msg)
+}
+
 func sendAccountInfo(bot *tgbotapi.BotAPI, chatID int64, data map[string]interface{}, config *BotConfig) {
 	ipInfo, _ := getIpInfo()
 	domain := config.Domain
@@ -413,8 +724,20 @@ func sendAccountInfo(bot *tgbotapi.BotAPI, chatID int64, data map[string]interfa
 		domain = "(Not Configured)"
 	}
 
-	msg := fmt.Sprintf("```\n━━━━━━━━━━━━━━━━━━━━━\n  PREMIUM ACCOUNT\n━━━━━━━━━━━━━━━━━━━━━\nPassword   : %s\nCITY       : %s\nISP        : %s\nDomain     : %s\nExpired On : %s\n━━━━━━━━━━━━━━━━━━━━━\n```\nTerima kasih telah berlangganan!",
-		data["password"], ipInfo.City, ipInfo.Isp, domain, data["expired"],
+	ipLimit := "1"
+	if val, ok := data["ip_limit"]; ok {
+		switch v := val.(type) {
+		case float64:
+			ipLimit = strconv.Itoa(int(v))
+		case int:
+			ipLimit = strconv.Itoa(v)
+		case string:
+			ipLimit = v
+		}
+	}
+
+	msg := fmt.Sprintf("```\n━━━━━━━━━━━━━━━━━━━━━\n  PREMIUM ACCOUNT\n━━━━━━━━━━━━━━━━━━━━━\nPassword   : %s\nLimit IP   : %s\nCITY       : %s\nISP        : %s\nDomain     : %s\nExpired On : %s\n━━━━━━━━━━━━━━━━━━━━━\n```\nTerima kasih telah berlangganan!",
+		data["password"], ipLimit, ipInfo.City, ipInfo.Isp, domain, data["expired"],
 	)
 
 	reply := tgbotapi.NewMessage(chatID, msg)
@@ -462,28 +785,7 @@ func deleteLastMessage(bot *tgbotapi.BotAPI, chatID int64) {
 
 func resetState(userID int64) {
 	delete(userStates, userID)
-	// Don't delete tempUserData immediately if pending payment, but here we do for cancel
-}
-
-func validatePassword(bot *tgbotapi.BotAPI, chatID int64, text string) bool {
-	if len(text) < 3 || len(text) > 20 {
-		sendMessage(bot, chatID, "❌ Password harus 3-20 karakter. Coba lagi:")
-		return false
-	}
-	if !regexp.MustCompile(`^[a-zA-Z0-9_-]+$`).MatchString(text) {
-		sendMessage(bot, chatID, "❌ Password hanya boleh huruf, angka, - dan _. Coba lagi:")
-		return false
-	}
-	return true
-}
-
-func validateNumber(bot *tgbotapi.BotAPI, chatID int64, text string, min, max int, fieldName string) (int, bool) {
-	val, err := strconv.Atoi(text)
-	if err != nil || val < min || val > max {
-		sendMessage(bot, chatID, fmt.Sprintf("❌ %s harus angka positif (%d-%d). Coba lagi:", fieldName, min, max))
-		return 0, false
-	}
-	return val, true
+	delete(tempUserData, userID)
 }
 
 func systemInfo(bot *tgbotapi.BotAPI, chatID int64, config *BotConfig) {
@@ -511,7 +813,7 @@ func systemInfo(bot *tgbotapi.BotAPI, chatID int64, config *BotConfig) {
 }
 
 func showBackupRestoreMenu(bot *tgbotapi.BotAPI, chatID int64) {
-	msg := tgbotapi.NewMessage(chatID, "🛠️ *Admin Panel*\nSilakan pilih menu:")
+	msg := tgbotapi.NewMessage(chatID, "💾 *Backup & Restore*\nSilakan pilih menu:")
 	msg.ParseMode = "Markdown"
 	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
@@ -562,7 +864,7 @@ func performBackup(bot *tgbotapi.BotAPI, chatID int64) {
 	zipWriter.Close()
 
 	fileName := fmt.Sprintf("zivpn-backup-%s.zip", time.Now().Format("20060102-150405"))
-	
+
 	// Create a temporary file for the upload
 	tmpFile := "/tmp/" + fileName
 	if err := ioutil.WriteFile(tmpFile, buf.Bytes(), 0644); err != nil {
@@ -573,7 +875,7 @@ func performBackup(bot *tgbotapi.BotAPI, chatID int64) {
 
 	doc := tgbotapi.NewDocument(chatID, tgbotapi.FilePath(tmpFile))
 	doc.Caption = "✅ Backup Data ZiVPN"
-	
+
 	deleteLastMessage(bot, chatID)
 	bot.Send(doc)
 }
@@ -586,7 +888,7 @@ func startRestore(bot *tgbotapi.BotAPI, chatID int64, userID int64) {
 func processRestoreFile(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, config *BotConfig) {
 	chatID := msg.Chat.ID
 	userID := msg.From.ID
-	
+
 	resetState(userID)
 	sendMessage(bot, chatID, "⏳ Sedang memproses file...")
 
@@ -622,13 +924,13 @@ func processRestoreFile(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, config *Bot
 	for _, f := range zipReader.File {
 		// Security check: only allow specific files
 		validFiles := map[string]bool{
-			"config.json": true,
-			"users.json": true,
+			"config.json":     true,
+			"users.json":      true,
 			"bot-config.json": true,
-			"domain": true,
-			"apikey": true,
+			"domain":          true,
+			"apikey":          true,
 		}
-		
+
 		if !validFiles[f.Name] {
 			continue
 		}
@@ -652,7 +954,7 @@ func processRestoreFile(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, config *Bot
 	// Restart Services
 	exec.Command("systemctl", "restart", "zivpn").Run()
 	exec.Command("systemctl", "restart", "zivpn-api").Run()
-	
+
 	msgSuccess := tgbotapi.NewMessage(chatID, "✅ Restore Berhasil!\nService ZiVPN, API, dan Bot telah direstart.")
 	bot.Send(msgSuccess)
 
@@ -680,51 +982,4 @@ func loadConfig() (BotConfig, error) {
 	}
 
 	return config, err
-}
-
-func apiCall(method, endpoint string, payload interface{}) (map[string]interface{}, error) {
-	var reqBody []byte
-	var err error
-
-	if payload != nil {
-		reqBody, err = json.Marshal(payload)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	client := &http.Client{}
-	req, err := http.NewRequest(method, ApiUrl+endpoint, bytes.NewBuffer(reqBody))
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-API-Key", ApiKey)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, _ := ioutil.ReadAll(resp.Body)
-	var result map[string]interface{}
-	json.Unmarshal(body, &result)
-
-	return result, nil
-}
-
-func getIpInfo() (IpInfo, error) {
-	resp, err := http.Get("http://ip-api.com/json/")
-	if err != nil {
-		return IpInfo{}, err
-	}
-	defer resp.Body.Close()
-
-	var info IpInfo
-	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
-		return IpInfo{}, err
-	}
-	return info, nil
 }

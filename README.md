@@ -58,11 +58,44 @@ Saat script berjalan, Anda akan diminta memasukkan:
 
 ### Paid Bot (Pakasir)
 *   **Public User**: Hanya bisa membeli akun (Create) dan Cek Info.
-*   **Admin**: Memiliki menu rahasia **🛠️ Admin Panel** yang berisi fitur manajemen dan **Backup & Restore**.
+*   **Admin**: Memiliki menu rahasia **🛠️ Admin Panel** dengan fitur lengkap:
+    *   Create / Renew / Delete user
+    *   List user & Cleanup expired
+    *   Backup & Restore data
+    *   Lock/Unlock user via command `/lock <user>` & `/unlock <user>`
+
+### Default Limit IP (Paid Bot)
+*   Setiap user baru yang dibuat via paid bot otomatis menggunakan `limit IP = 1`.
+*   Nilai ini dikirim ke API dan disimpan di database (user lama tidak diubah).
+
+### Notifikasi Multi Login (Admin Paid Bot)
+*   Saat user melebihi limit IP, admin menerima notifikasi real-time.
+*   Isi minimal: password, jumlah IP aktif vs limit, action `notify`.
+*   Sistem memakai cooldown default 5 menit untuk mencegah spam.
 
 ### Fitur Backup & Restore
 *   **Backup**: Bot mengirim file ZIP berisi semua data server (`config.json`, `users.json`, dll).
 *   **Restore**: Kirim file ZIP backup ke bot untuk restore data dan restart server otomatis.
+
+---
+
+## ✅ Manual Test (Sederhana)
+
+1. **Admin Paid Bot - Create User Manual**
+    *   Buka **Admin Panel** → `Create Password`
+    *   Masukkan password & durasi
+    *   Pastikan hasil menunjukkan `Limit IP = 1`
+2. **Public Paid Bot - Create via Payment**
+    *   Beli akun via QRIS
+    *   Pastikan hasil menunjukkan `Limit IP = 1`
+3. **Admin Paid Bot - User Management**
+    *   Coba `List Passwords`, `Renew`, `Delete`, dan `Cleanup Expired`
+    *   Coba `/lock <user>` dan `/unlock <user>` sebagai admin
+4. **Backup & Restore**
+    *   Admin Panel → `Backup & Restore`, lakukan backup lalu restore file ZIP
+5. **Multi Login Notification**
+    *   Login dengan 2 IP berbeda pada user limit 1
+    *   Pastikan admin menerima notifikasi (dengan cooldown anti-spam)
 
 ---
 
