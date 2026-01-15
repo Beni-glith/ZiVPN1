@@ -29,7 +29,7 @@ const (
 	ApiPortFile   = "/etc/zivpn/api_port"
 	ApiKeyFile    = "/etc/zivpn/apikey"
 	DomainFile    = "/etc/zivpn/domain"
-	PortFile	  = "/etc/zivpn/port"
+	PortFile      = "/etc/zivpn/port"
 )
 
 var ApiUrl = "http://127.0.0.1:" + PortFile + "/api"
@@ -50,10 +50,11 @@ type IpInfo struct {
 }
 
 type UserData struct {
-	Password string `json:"password"`
-	Expired  string `json:"expired"`
-	Status   string `json:"status"`
-	IpLimit  int    `json:"ip_limit"`
+	Password     string `json:"password"`
+	Expired      string `json:"expired"`
+	Status       string `json:"status"`
+	IpLimit      int    `json:"ip_limit"`
+	ManualLocked bool   `json:"manual_locked"`
 }
 
 // ==========================================
@@ -139,6 +140,10 @@ func handleMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, config *BotConfi
 		switch msg.Command() {
 		case "start":
 			showMainMenu(bot, msg.Chat.ID, config)
+		case "lock":
+			handleLockCommand(bot, msg, config, true)
+		case "unlock":
+			handleLockCommand(bot, msg, config, false)
 		default:
 			replyError(bot, msg.Chat.ID, "Perintah tidak dikenal.")
 		}
@@ -235,9 +240,17 @@ func handleState(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, state string, conf
 			return
 		}
 		tempUserData[userID]["days"] = text
-		
-		days, _ := strconv.Atoi(text)
-		createUser(bot, chatID, tempUserData[userID]["username"], days, config)
+		userStates[userID] = "create_ip_limit"
+		sendMessage(bot, chatID, "🌐 Masukkan Limit IP (angka, default 1):")
+
+	case "create_ip_limit":
+		ipLimit, ok := validateNumber(bot, chatID, text, 1, 9999, "Limit IP")
+		if !ok {
+			return
+		}
+		tempUserData[userID]["ip_limit"] = strconv.Itoa(ipLimit)
+		days, _ := strconv.Atoi(tempUserData[userID]["days"])
+		createUser(bot, chatID, tempUserData[userID]["username"], days, ipLimit, config)
 		resetState(userID)
 
 	case "renew_days":
@@ -305,10 +318,11 @@ func toggleMode(bot *tgbotapi.BotAPI, chatID int64, userID int64, config *BotCon
 	showMainMenu(bot, chatID, config)
 }
 
-func createUser(bot *tgbotapi.BotAPI, chatID int64, username string, days int, config *BotConfig) {
+func createUser(bot *tgbotapi.BotAPI, chatID int64, username string, days int, ipLimit int, config *BotConfig) {
 	res, err := apiCall("POST", "/user/create", map[string]interface{}{
 		"password": username,
 		"days":     days,
+		"ip_limit": ipLimit,
 	})
 
 	if err != nil {
@@ -368,6 +382,44 @@ func deleteUser(bot *tgbotapi.BotAPI, chatID int64, username string, config *Bot
 	}
 }
 
+func handleLockCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, config *BotConfig, lock bool) {
+	if msg.From.ID != config.AdminID {
+		replyError(bot, msg.Chat.ID, "⛔ Akses Ditolak. Hanya admin.")
+		return
+	}
+
+	username := strings.TrimSpace(msg.CommandArguments())
+	if username == "" {
+		action := "lock"
+		if !lock {
+			action = "unlock"
+		}
+		sendMessage(bot, msg.Chat.ID, fmt.Sprintf("Format: /%s <username>", action))
+		return
+	}
+
+	endpoint := "/user/lock"
+	successMessage := "✅ User berhasil di-lock."
+	if !lock {
+		endpoint = "/user/unlock"
+		successMessage = "✅ User berhasil di-unlock."
+	}
+
+	res, err := apiCall("POST", endpoint, map[string]interface{}{
+		"username": username,
+	})
+	if err != nil {
+		replyError(bot, msg.Chat.ID, "Error API: "+err.Error())
+		return
+	}
+
+	if res["success"] == true {
+		sendMessage(bot, msg.Chat.ID, successMessage)
+	} else {
+		replyError(bot, msg.Chat.ID, fmt.Sprintf("Gagal: %s", res["message"]))
+	}
+}
+
 func listUsers(bot *tgbotapi.BotAPI, chatID int64) {
 	res, err := apiCall("GET", "/users", nil)
 	if err != nil {
@@ -388,6 +440,8 @@ func listUsers(bot *tgbotapi.BotAPI, chatID int64) {
 			status := "🟢"
 			if user["status"] == "Expired" {
 				status = "🔴"
+			} else if user["status"] == "Locked" {
+				status = "🔒"
 			}
 			msg += fmt.Sprintf("\n%s `%s` (%s)", status, user["password"], user["expired"])
 		}
@@ -514,7 +568,7 @@ func performBackup(bot *tgbotapi.BotAPI, chatID int64) {
 	zipWriter.Close()
 
 	fileName := fmt.Sprintf("zivpn-backup-%s.zip", time.Now().Format("20060102-150405"))
-	
+
 	// Create a temporary file for the upload
 	tmpFile := "/tmp/" + fileName
 	if err := ioutil.WriteFile(tmpFile, buf.Bytes(), 0644); err != nil {
@@ -525,7 +579,7 @@ func performBackup(bot *tgbotapi.BotAPI, chatID int64) {
 
 	doc := tgbotapi.NewDocument(chatID, tgbotapi.FilePath(tmpFile))
 	doc.Caption = "✅ Backup Data ZiVPN"
-	
+
 	deleteLastMessage(bot, chatID)
 	bot.Send(doc)
 }
@@ -538,7 +592,7 @@ func startRestore(bot *tgbotapi.BotAPI, chatID int64, userID int64) {
 func processRestoreFile(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, config *BotConfig) {
 	chatID := msg.Chat.ID
 	userID := msg.From.ID
-	
+
 	resetState(userID)
 	sendMessage(bot, chatID, "⏳ Sedang memproses file...")
 
@@ -574,13 +628,13 @@ func processRestoreFile(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, config *Bot
 	for _, f := range zipReader.File {
 		// Security check: only allow specific files
 		validFiles := map[string]bool{
-			"config.json": true,
-			"users.json": true,
+			"config.json":     true,
+			"users.json":      true,
 			"bot-config.json": true,
-			"domain": true,
-			"apikey": true,
+			"domain":          true,
+			"apikey":          true,
 		}
-		
+
 		if !validFiles[f.Name] {
 			continue
 		}
@@ -604,10 +658,10 @@ func processRestoreFile(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, config *Bot
 	// Restart Services
 	exec.Command("systemctl", "restart", "zivpn").Run()
 	exec.Command("systemctl", "restart", "zivpn-api").Run()
-	
+
 	msgSuccess := tgbotapi.NewMessage(chatID, "✅ Restore Berhasil!\nService ZiVPN, API, dan Bot telah direstart.")
 	bot.Send(msgSuccess)
-	
+
 	// Restart Bot with delay to allow message sending
 	go func() {
 		time.Sleep(2 * time.Second)
@@ -656,7 +710,7 @@ func getMainMenuKeyboard(config *BotConfig, userID int64) tgbotapi.InlineKeyboar
 		}
 
 		rows[1] = append(rows[1], tgbotapi.NewInlineKeyboardButtonData("📋 List Passwords", "menu_list"))
-		
+
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("📊 System Info", "menu_info"),
 			tgbotapi.NewInlineKeyboardButtonData("💾 Backup & Restore", "menu_backup_restore"),
@@ -677,8 +731,21 @@ func sendAccountInfo(bot *tgbotapi.BotAPI, chatID int64, data map[string]interfa
 		domain = "(Not Configured)"
 	}
 
-	msg := fmt.Sprintf("```\n━━━━━━━━━━━━━━━━━━━━━\n  ACCOUNT ZIVPN UDP\n━━━━━━━━━━━━━━━━━━━━━\nPassword   : %s\nCITY       : %s\nISP        : %s\nIP ISP     : %s\nDomain     : %s\nExpired On : %s\n━━━━━━━━━━━━━━━━━━━━━\n```",
+	ipLimit := "1"
+	if val, ok := data["ip_limit"]; ok {
+		switch v := val.(type) {
+		case float64:
+			ipLimit = strconv.Itoa(int(v))
+		case int:
+			ipLimit = strconv.Itoa(v)
+		case string:
+			ipLimit = v
+		}
+	}
+
+	msg := fmt.Sprintf("```\n━━━━━━━━━━━━━━━━━━━━━\n  ACCOUNT ZIVPN UDP\n━━━━━━━━━━━━━━━━━━━━━\nPassword   : %s\nLimit IP   : %s\nCITY       : %s\nISP        : %s\nIP ISP     : %s\nDomain     : %s\nExpired On : %s\n━━━━━━━━━━━━━━━━━━━━━\n```",
 		data["password"],
+		ipLimit,
 		ipInfo.City,
 		ipInfo.Isp,
 		ipInfo.Query,
