@@ -1,4 +1,4 @@
-package main
+package botshared
 
 import (
 	"bytes"
@@ -6,10 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
-	"strconv"
-
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 type IpInfo struct {
@@ -38,7 +34,7 @@ type UserData struct {
 	ManualLocked bool   `json:"manual_locked"`
 }
 
-func apiCall(method, endpoint string, payload interface{}) (map[string]interface{}, error) {
+func ApiCall(method, endpoint string, payload interface{}) (map[string]interface{}, error) {
 	var reqBody []byte
 	var err error
 
@@ -71,7 +67,7 @@ func apiCall(method, endpoint string, payload interface{}) (map[string]interface
 	return result, nil
 }
 
-func getIpInfo() (IpInfo, error) {
+func GetIpInfo() (IpInfo, error) {
 	resp, err := http.Get("http://ip-api.com/json/")
 	if err != nil {
 		return IpInfo{}, err
@@ -85,29 +81,8 @@ func getIpInfo() (IpInfo, error) {
 	return info, nil
 }
 
-func validateUsername(bot *tgbotapi.BotAPI, chatID int64, text string) bool {
-	if len(text) < 3 || len(text) > 20 {
-		sendMessage(bot, chatID, "❌ Password harus 3-20 karakter. Coba lagi:")
-		return false
-	}
-	if !regexp.MustCompile(`^[a-zA-Z0-9_-]+$`).MatchString(text) {
-		sendMessage(bot, chatID, "❌ Password hanya boleh huruf, angka, - dan _. Coba lagi:")
-		return false
-	}
-	return true
-}
-
-func validateNumber(bot *tgbotapi.BotAPI, chatID int64, text string, min, max int, fieldName string) (int, bool) {
-	val, err := strconv.Atoi(text)
-	if err != nil || val < min || val > max {
-		sendMessage(bot, chatID, fmt.Sprintf("❌ %s harus angka positif (%d-%d). Coba lagi:", fieldName, min, max))
-		return 0, false
-	}
-	return val, true
-}
-
-func getUsers() ([]UserData, error) {
-	res, err := apiCall("GET", "/users", nil)
+func GetUsers() ([]UserData, error) {
+	res, err := ApiCall("GET", "/users", nil)
 	if err != nil {
 		return nil, err
 	}

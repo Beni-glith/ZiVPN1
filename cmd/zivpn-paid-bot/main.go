@@ -12,12 +12,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"zivpn/internal/botshared"
 )
 
 // ==========================================
@@ -50,14 +52,14 @@ var mutex = &sync.Mutex{}
 // ==========================================
 
 func main() {
-	if keyBytes, err := ioutil.ReadFile(ApiKeyFile); err == nil {
-		ApiKey = strings.TrimSpace(string(keyBytes))
+	if keyBytes, err := ioutil.ReadFile(botshared.ApiKeyFile); err == nil {
+		botshared.ApiKey = strings.TrimSpace(string(keyBytes))
 	}
 
 	// Load API Port
-	if portBytes, err := ioutil.ReadFile(ApiPortFile); err == nil {
+	if portBytes, err := ioutil.ReadFile(botshared.ApiPortFile); err == nil {
 		port := strings.TrimSpace(string(portBytes))
-		ApiUrl = fmt.Sprintf("http://127.0.0.1:%s/api", port)
+		botshared.ApiUrl = fmt.Sprintf("http://127.0.0.1:%s/api", port)
 	}
 
 	config, err := loadConfig()
@@ -341,7 +343,7 @@ func handlePagination(bot *tgbotapi.BotAPI, chatID int64, data string) {
 }
 
 func showUserSelection(bot *tgbotapi.BotAPI, chatID int64, page int, action string) {
-	users, err := getUsers()
+	users, err := botshared.GetUsers()
 	if err != nil {
 		replyError(bot, chatID, "Gagal mengambil data user.")
 		return
@@ -401,7 +403,7 @@ func showUserSelection(bot *tgbotapi.BotAPI, chatID int64, page int, action stri
 }
 
 func deleteUser(bot *tgbotapi.BotAPI, chatID int64, username string, config *BotConfig) {
-	res, err := apiCall("POST", "/user/delete", map[string]interface{}{
+	res, err := botshared.ApiCall("POST", "/user/delete", map[string]interface{}{
 		"password": username,
 	})
 
@@ -422,7 +424,7 @@ func deleteUser(bot *tgbotapi.BotAPI, chatID int64, username string, config *Bot
 }
 
 func renewUser(bot *tgbotapi.BotAPI, chatID int64, username string, days int, config *BotConfig) {
-	res, err := apiCall("POST", "/user/renew", map[string]interface{}{
+	res, err := botshared.ApiCall("POST", "/user/renew", map[string]interface{}{
 		"password": username,
 		"days":     days,
 	})
@@ -442,7 +444,7 @@ func renewUser(bot *tgbotapi.BotAPI, chatID int64, username string, days int, co
 }
 
 func listUsers(bot *tgbotapi.BotAPI, chatID int64) {
-	res, err := apiCall("GET", "/users", nil)
+	res, err := botshared.ApiCall("GET", "/users", nil)
 	if err != nil {
 		replyError(bot, chatID, "Error API: "+err.Error())
 		return
@@ -478,7 +480,7 @@ func listUsers(bot *tgbotapi.BotAPI, chatID int64) {
 func cleanupExpiredUsers(bot *tgbotapi.BotAPI, chatID int64, config *BotConfig) {
 	sendMessage(bot, chatID, "⏳ Sedang membersihkan akun expired...")
 
-	res, err := apiCall("POST", "/cron/cleanup", nil)
+	res, err := botshared.ApiCall("POST", "/cron/cleanup", nil)
 	if err != nil {
 		replyError(bot, chatID, "Error API: "+err.Error())
 		showMainMenu(bot, chatID, config)
@@ -536,7 +538,7 @@ func handleLockCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, config *BotC
 		successMessage = "✅ User berhasil di-unlock."
 	}
 
-	res, err := apiCall("POST", endpoint, map[string]interface{}{
+	res, err := botshared.ApiCall("POST", endpoint, map[string]interface{}{
 		"username": username,
 	})
 	if err != nil {
@@ -579,7 +581,7 @@ func startPaymentChecker(bot *tgbotapi.BotAPI, config *BotConfig) {
 }
 
 func createUser(bot *tgbotapi.BotAPI, chatID int64, password string, days int, ipLimit int, config *BotConfig) {
-	res, err := apiCall("POST", "/user/create", map[string]interface{}{
+	res, err := botshared.ApiCall("POST", "/user/create", map[string]interface{}{
 		"password": password,
 		"days":     days,
 		"ip_limit": ipLimit,
@@ -663,7 +665,7 @@ func checkPakasirStatus(config *BotConfig, orderID string, amountStr string) (st
 // ==========================================
 
 func showMainMenu(bot *tgbotapi.BotAPI, chatID int64, config *BotConfig) {
-	ipInfo, _ := getIpInfo()
+	ipInfo, _ := botshared.GetIpInfo()
 	domain := config.Domain
 	if domain == "" {
 		domain = "(Not Configured)"
@@ -718,7 +720,7 @@ func showAdminMenu(bot *tgbotapi.BotAPI, chatID int64) {
 }
 
 func sendAccountInfo(bot *tgbotapi.BotAPI, chatID int64, data map[string]interface{}, config *BotConfig) {
-	ipInfo, _ := getIpInfo()
+	ipInfo, _ := botshared.GetIpInfo()
 	domain := config.Domain
 	if domain == "" {
 		domain = "(Not Configured)"
@@ -745,6 +747,27 @@ func sendAccountInfo(bot *tgbotapi.BotAPI, chatID int64, data map[string]interfa
 	deleteLastMessage(bot, chatID)
 	bot.Send(reply)
 	showMainMenu(bot, chatID, config)
+}
+
+func validateUsername(bot *tgbotapi.BotAPI, chatID int64, text string) bool {
+	if len(text) < 3 || len(text) > 20 {
+		sendMessage(bot, chatID, "❌ Password harus 3-20 karakter. Coba lagi:")
+		return false
+	}
+	if !regexp.MustCompile(`^[a-zA-Z0-9_-]+$`).MatchString(text) {
+		sendMessage(bot, chatID, "❌ Password hanya boleh huruf, angka, - dan _. Coba lagi:")
+		return false
+	}
+	return true
+}
+
+func validateNumber(bot *tgbotapi.BotAPI, chatID int64, text string, min, max int, fieldName string) (int, bool) {
+	val, err := strconv.Atoi(text)
+	if err != nil || val < min || val > max {
+		sendMessage(bot, chatID, fmt.Sprintf("❌ %s harus angka positif (%d-%d). Coba lagi:", fieldName, min, max))
+		return 0, false
+	}
+	return val, true
 }
 
 func sendMessage(bot *tgbotapi.BotAPI, chatID int64, text string) {
@@ -789,7 +812,7 @@ func resetState(userID int64) {
 }
 
 func systemInfo(bot *tgbotapi.BotAPI, chatID int64, config *BotConfig) {
-	res, err := apiCall("GET", "/info", nil)
+	res, err := botshared.ApiCall("GET", "/info", nil)
 	if err != nil {
 		replyError(bot, chatID, "Error API: "+err.Error())
 		return
@@ -797,7 +820,7 @@ func systemInfo(bot *tgbotapi.BotAPI, chatID int64, config *BotConfig) {
 
 	if res["success"] == true {
 		data := res["data"].(map[string]interface{})
-		ipInfo, _ := getIpInfo()
+		ipInfo, _ := botshared.GetIpInfo()
 
 		msg := fmt.Sprintf("```\n━━━━━━━━━━━━━━━━━━━━━\n    INFO ZIVPN UDP\n━━━━━━━━━━━━━━━━━━━━━\nDomain         : %s\nIP Public      : %s\nPort           : %s\nService        : %s\nCITY           : %s\nISP            : %s\n━━━━━━━━━━━━━━━━━━━━━\n```",
 			config.Domain, data["public_ip"], data["port"], data["service"], ipInfo.City, ipInfo.Isp)
@@ -969,14 +992,14 @@ func processRestoreFile(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, config *Bot
 
 func loadConfig() (BotConfig, error) {
 	var config BotConfig
-	file, err := ioutil.ReadFile(BotConfigFile)
+	file, err := ioutil.ReadFile(botshared.BotConfigFile)
 	if err != nil {
 		return config, err
 	}
 	err = json.Unmarshal(file, &config)
 
 	if config.Domain == "" {
-		if domainBytes, err := ioutil.ReadFile(DomainFile); err == nil {
+		if domainBytes, err := ioutil.ReadFile(botshared.DomainFile); err == nil {
 			config.Domain = strings.TrimSpace(string(domainBytes))
 		}
 	}
