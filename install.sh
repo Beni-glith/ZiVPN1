@@ -203,9 +203,11 @@ if [[ -n "$bot_token" ]] && [[ -n "$admin_id" ]]; then
   
   run_silent "Downloading Bot" "wget -q https://raw.githubusercontent.com/Beni-glith/ZiVPN1/main/$bot_file -O /etc/zivpn/api/$bot_file"
   run_silent "Downloading Bot Shared" "wget -q https://raw.githubusercontent.com/Beni-glith/ZiVPN1/main/bot_shared.go -O /etc/zivpn/api/bot_shared.go"
+  run_silent "Downloading Bot Module" "wget -q https://raw.githubusercontent.com/Beni-glith/ZiVPN1/main/go.mod -O /etc/zivpn/api/go.mod"
+  run_silent "Downloading Bot Checksums" "wget -q https://raw.githubusercontent.com/Beni-glith/ZiVPN1/main/go.sum -O /etc/zivpn/api/go.sum"
   
   cd /etc/zivpn/api
-  run_silent "Downloading Bot Deps" "go get github.com/go-telegram-bot-api/telegram-bot-api/v5"
+  run_silent "Downloading Bot Deps" "go mod download"
   
   if go build -o zivpn-bot "$bot_file" bot_shared.go &>/dev/null; then
     print_done "Compiling Bot"
