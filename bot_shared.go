@@ -19,14 +19,15 @@ type IpInfo struct {
 }
 
 const (
-	BotConfigFile = "/etc/zivpn/bot-config.json"
-	ApiPortFile   = "/etc/zivpn/api_port"
-	ApiKeyFile    = "/etc/zivpn/apikey"
-	DomainFile    = "/etc/zivpn/domain"
-	PortFile      = "/etc/zivpn/port"
+	BotConfigFile  = "/etc/zivpn/bot-config.json"
+	ApiPortFile    = "/etc/zivpn/api_port"
+	ApiKeyFile     = "/etc/zivpn/apikey"
+	DomainFile     = "/etc/zivpn/domain"
+	PortFile       = "/etc/zivpn/port"
+	DefaultApiPort = "8080"
 )
 
-var ApiUrl = "http://127.0.0.1:" + PortFile + "/api"
+var ApiUrl = "http://127.0.0.1:" + DefaultApiPort + "/api"
 
 var ApiKey = "AutoFtBot-agskjgdvsbdreiWG1234512SDKrqw"
 
