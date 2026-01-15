@@ -1,3 +1,6 @@
+//go:build paid
+// +build paid
+
 package main
 
 import (

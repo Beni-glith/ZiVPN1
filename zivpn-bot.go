@@ -1,3 +1,6 @@
+//go:build !api && !paid
+// +build !api,!paid
+
 package main
 
 import (
